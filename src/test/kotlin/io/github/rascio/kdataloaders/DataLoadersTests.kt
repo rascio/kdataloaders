@@ -73,14 +73,15 @@ class DataLoadersTests : LogScope {
             getPersonsById(keys)
         }
         registry.withDataLoaders {
-            val john = GetPersonById(1)
-            val anotherJohn = GetPersonById(1)
+            val paul = GetPersonById(2)
+            val anotherPaul = GetPersonById(2)
 
             log("Loading")
 
             withTimeout(100) {
-                assertEquals("john", anotherJohn.await())
-                assertEquals("john", john.await())
+                assertEquals("paul", anotherPaul.await())
+                assertEquals("paul", paul.await())
+
                 //two queries with the same id will trigger the data loader only once
                 assertEquals(1, counter.get())
             }
