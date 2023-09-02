@@ -24,6 +24,9 @@ interface DataLoader<Ref: DataLoaderRef<K, V>, K : Any, V> {
     val ref: Ref
     suspend fun load(keys: Set<K>): Map<K, V>
 
+    /**
+     * Used to modify the CoroutineContext used in the DataLoaderExecutionScope
+     */
     fun register(ctx: CoroutineContext): CoroutineContext = ctx
 }
 
@@ -46,4 +49,7 @@ interface DataLoaderExecutionScope {
     suspend operator fun  <K : Any, V> DataLoaderRef<K, V>.invoke(key: K): Deferred<V>
 }
 
+/**
+ * Thrown when a data loader is invoked on a key, but it doesn't produce any value for it.
+ */
 class MissingResultException(val key: Any, val ref: DataLoaderRef<*, *>): IllegalStateException("Key [$key] is missing from results of data loader $ref")

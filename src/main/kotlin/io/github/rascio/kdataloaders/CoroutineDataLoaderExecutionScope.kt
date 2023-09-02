@@ -73,8 +73,6 @@ class CoroutineDataLoaderExecutionScope internal constructor(
          * and then it will be cleared waiting for another dispatch
          */
         private val state = mutableMapOf<DataLoaderRef<*, *>, MutableMap<Any, CompletableDeferred<*>>>()
-        // The version will increase every time a query is executed
-        val version = AtomicLong()
 
         /*
          * Append a query in the state, generate a CompletableDeferred for it, if not already available
@@ -116,6 +114,8 @@ class CoroutineDataLoaderExecutionScope internal constructor(
      */
     private val mutex = Mutex()
     private val queue: State = State()
+    // The version will increase every time a DataLoader is invoked
+    val version = AtomicLong()
     private val isDispatching = AtomicBoolean(false)
 
     /**
@@ -124,7 +124,7 @@ class CoroutineDataLoaderExecutionScope internal constructor(
     override suspend fun <K : Any, V> DataLoaderRef<K, V>.invoke(key: K): Deferred<V> {
         val query = this to key
         eventListener(DataLoaderEvent.AcquiringLock(query))
-        queue.version.incrementAndGet()
+        version.incrementAndGet()
         return mutex.withLock {
             queue.append(query).also {
                 eventListener(DataLoaderEvent.QueryAppended(query))
@@ -168,16 +168,16 @@ class CoroutineDataLoaderExecutionScope internal constructor(
     }
 
     private suspend fun awaitConcurrentDataLoadersAppend(query: Query<*, *>) {
-        var read: Long = queue.version.get()
+        var read: Long = version.get()
         var expected: Long
         do {
             eventListener(DataLoaderEvent.WaitForBatching(query, read))
             expected = read
             // try to run other coroutines if scheduled
             // yield()
-            // a small delay works better than yield() as it allows to aggregate on multiple threads
+            // a small delay works better than yield() as it better support multi threading
             delay(5)
-            read = queue.version.get()
+            read = version.get()
             eventListener(DataLoaderEvent.CheckForBatching(query, expected, read))
             // if yield() did run a coroutine which has appended a query
             // the version will be different

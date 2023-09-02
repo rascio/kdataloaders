@@ -4,6 +4,13 @@ import kotlinx.coroutines.coroutineScope
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
 
+/**
+ * Enable caching capability to a DataLoader.
+ * When caching is enabled when a key is loaded will be cached in the current DataLoaderExecutionScope,
+ * and its DataLoader will not be called anymore when requesting the same cache key.
+ *
+ * If during the execution multiple keys are requested, the data loader will be invoked using only the keys missing in the cache.
+ */
 fun <Ref : DataLoaderRef<K, V>, K : Any, V> DataLoader<Ref, K, V>.cached() = object : DataLoader<Ref, K, V> {
     override val ref = this@cached.ref
 
@@ -29,7 +36,10 @@ fun <Ref : DataLoaderRef<K, V>, K : Any, V> DataLoader<Ref, K, V>.cached() = obj
         ctx + DataLoaderCache(key)
 }
 
-class DataLoaderCache<K, V>(key: DataLoaderCacheKey<K, V>) : CoroutineContext.Element {
+/**
+ * The cache takes advantage of the coroutine context to store the values.
+ */
+internal class DataLoaderCache<K, V>(key: DataLoaderCacheKey<K, V>) : CoroutineContext.Element {
     class DataLoaderCacheKey<K, V> : CoroutineContext.Key<DataLoaderCache<K, V>>
     override val key: CoroutineContext.Key<*> = key
 
