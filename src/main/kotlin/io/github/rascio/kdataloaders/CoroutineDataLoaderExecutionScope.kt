@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -84,7 +85,7 @@ class CoroutineDataLoaderExecutionScope internal constructor(
                 .computeIfAbsent(ref) { mutableMapOf() }
                 .computeIfAbsent(key) { CompletableDeferred<Any>() }
 
-            version.incrementAndGet()
+            //version.incrementAndGet()
             @Suppress("UNCHECKED_CAST")
             return found as Deferred<V>
         }
@@ -123,6 +124,7 @@ class CoroutineDataLoaderExecutionScope internal constructor(
     override suspend fun <K : Any, V> DataLoaderRef<K, V>.invoke(key: K): Deferred<V> {
         val query = this to key
         eventListener(DataLoaderEvent.AcquiringLock(query))
+        queue.version.incrementAndGet()
         return mutex.withLock {
             queue.append(query).also {
                 eventListener(DataLoaderEvent.QueryAppended(query))
@@ -130,9 +132,6 @@ class CoroutineDataLoaderExecutionScope internal constructor(
                 if (!isDispatching.get()) {
                     dispatch(query)
                 }
-//                else {
-//                    log("AlreadyDispatching")
-//                }
             }
         }
     }
@@ -180,7 +179,7 @@ class CoroutineDataLoaderExecutionScope internal constructor(
             delay(5)
             read = queue.version.get()
             eventListener(DataLoaderEvent.CheckForBatching(query, expected, read))
-            // if yield() did run a coroutine which has appended something
+            // if yield() did run a coroutine which has appended a query
             // the version will be different
         } while (read != expected)
     }

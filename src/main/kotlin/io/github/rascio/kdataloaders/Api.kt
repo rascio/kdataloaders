@@ -1,6 +1,7 @@
 package io.github.rascio.kdataloaders
 
 import kotlinx.coroutines.Deferred
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Represent a DataLoader.
@@ -22,6 +23,8 @@ interface DataLoaderRef<K : Any, V>
 interface DataLoader<Ref: DataLoaderRef<K, V>, K : Any, V> {
     val ref: Ref
     suspend fun load(keys: Set<K>): Map<K, V>
+
+    fun register(ctx: CoroutineContext): CoroutineContext = ctx
 }
 
 /**
