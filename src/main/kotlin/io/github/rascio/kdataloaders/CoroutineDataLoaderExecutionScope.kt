@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -67,10 +68,10 @@ class CoroutineDataLoaderExecutionScope internal constructor(
 
     private class State {
         /*
-         * Contains all the ongoing query, they are executed asynchronously
+         * Contains all the ongoing queries, they are executed asynchronously
          * and then it will be cleared waiting for another dispatch
          */
-        private val state = ConcurrentHashMap<DataLoaderRef<*, *>, MutableMap<Any, CompletableDeferred<*>>>()
+        private val state = mutableMapOf<DataLoaderRef<*, *>, MutableMap<Any, CompletableDeferred<*>>>()
         // The version will increase every time a query is executed
         val version = AtomicLong()
 
@@ -80,7 +81,7 @@ class CoroutineDataLoaderExecutionScope internal constructor(
         fun <K : Any, V> append(query: Query<K, V>): Deferred<V> {
             val (key, ref) = query
             val found = state
-                .computeIfAbsent(ref) { ConcurrentHashMap<Any, CompletableDeferred<*>>() }
+                .computeIfAbsent(ref) { mutableMapOf() }
                 .computeIfAbsent(key) { CompletableDeferred<Any>() }
 
             version.incrementAndGet()
@@ -128,9 +129,10 @@ class CoroutineDataLoaderExecutionScope internal constructor(
                 // If not already dispatching, do the dispatch
                 if (!isDispatching.get()) {
                     dispatch(query)
-                } else {
-                    log("AlreadyDispatching")
                 }
+//                else {
+//                    log("AlreadyDispatching")
+//                }
             }
         }
     }
@@ -173,9 +175,11 @@ class CoroutineDataLoaderExecutionScope internal constructor(
             eventListener(DataLoaderEvent.WaitForBatching(query, read))
             expected = read
             // try to run other coroutines if scheduled
-            yield()
+            // yield()
+            // a small delay works better than yield() as it allows to aggregate on multiple threads
+            delay(5)
             read = queue.version.get()
-            eventListener(DataLoaderEvent.CheckForBatching(query, read, expected))
+            eventListener(DataLoaderEvent.CheckForBatching(query, expected, read))
             // if yield() did run a coroutine which has appended something
             // the version will be different
         } while (read != expected)

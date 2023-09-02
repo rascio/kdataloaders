@@ -4,17 +4,6 @@ import io.github.rascio.kdataloaders.CoroutineDataLoaderExecutionScope.Companion
 import kotlinx.coroutines.channels.Channel
 import kotlin.reflect.full.memberProperties
 
-object DataLoaderEventLogger : DataLoaderEventListener, LogScope {
-    override suspend fun invoke(event: DataLoaderEvent) =
-        log(event.name, *event.toParams())
-
-    private val DataLoaderEvent.name get() = this::class.simpleName!!
-
-    fun DataLoaderEvent.toParams() =
-        this::class.memberProperties
-            .map { it.name to it.call(this) }
-            .toTypedArray()
-}
 
 class ChannelEventListener(private val predicate: (DataLoaderEvent) -> Boolean) : DataLoaderEventListener, LogScope {
     val out = Channel<Pair<DataLoaderEvent, Channel<Unit>>>()

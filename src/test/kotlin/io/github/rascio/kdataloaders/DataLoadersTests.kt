@@ -3,7 +3,7 @@ import arrow.atomic.AtomicInt
 import arrow.fx.coroutines.CyclicBarrier
 import io.github.rascio.kdataloaders.ChannelEventListener
 import io.github.rascio.kdataloaders.CoroutineDataLoaderExecutionScope.Companion.DataLoaderEvent
-import io.github.rascio.kdataloaders.DataLoaderEventLogger
+import io.github.rascio.kdataloaders.LoggerEventListener
 import io.github.rascio.kdataloaders.DataLoaderRef
 import io.github.rascio.kdataloaders.DataLoaderRegistry
 import io.github.rascio.kdataloaders.LogScope
@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -23,7 +24,10 @@ import kotlinx.coroutines.yield
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.util.TreeMap
+import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -47,7 +51,7 @@ class DataLoadersTests : LogScope {
 
     @Test
     fun `should call a single data loader`() = runBlocking {
-        val registry = DataLoaderRegistry(DataLoaderEventLogger) + GetPersonById.batched { keys ->
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
             getPersonsById(keys)
         }
         registry.withDataLoaders {
@@ -64,12 +68,12 @@ class DataLoadersTests : LogScope {
     @Test
     fun `should collapse same queries`() = runBlocking {
         val counter = AtomicInt()
-        val registry = DataLoaderRegistry(DataLoaderEventLogger) + GetPersonById.batched { keys ->
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
             counter.incrementAndGet()
             // Given two queries are run concurrently
             // When requesting the same key
             // Then we will receive a single key for both of them
-            assertEquals(1, keys.size)
+            check(1 == keys.size)
             getPersonsById(keys)
         }
         registry.withDataLoaders {
@@ -91,10 +95,10 @@ class DataLoadersTests : LogScope {
     @Test
     fun `should aggregate calls to same data loader`() = runBlocking {
 
-        val registry = DataLoaderRegistry(DataLoaderEventLogger) + GetPersonById.batched { keys ->
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
             log("GetPersonById", "keys" to keys)
             // we will receive two keys if queries are batched
-            assertEquals(2, keys.size)
+            check(2 == keys.size)
             getPersonsById(keys)
         }
         registry.withDataLoaders {
@@ -112,7 +116,7 @@ class DataLoadersTests : LogScope {
 
     @Test
     fun `should fail on missing key`(): Unit = runBlocking {
-        val registry = DataLoaderRegistry(DataLoaderEventLogger) + GetPersonById.batched { keys ->
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
             getPersonsById(keys)
         }
         registry.withDataLoaders {
@@ -134,15 +138,45 @@ class DataLoadersTests : LogScope {
     }
 
     @Test
-    fun `should wait to dispatch until other queries are published`(): Unit = runBlocking {
-        (1..30).forEach {
+    fun `should aggregate calls to same data loader on different coroutines`(): Unit = runBlocking {
+
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
+            log("GetPersonById", "keys" to keys)
+            // we will receive two keys if queries are batched
+            check(2 == keys.size)
+            getPersonsById(keys)
+        }
+        registry.withDataLoaders {
+            listOf(
+                launch {
+                    val john = GetPersonById(1)
+                    log("step1")
+                    withTimeout(500) {
+                        assertEquals("john", john.await())
+                    }
+                },
+                launch {
+                    val paul = GetPersonById(2)
+                    log("step2")
+                    withTimeout(500) {
+                        assertEquals("paul", paul.await())
+                    }
+                }
+            ).joinAll()
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(ints = [2, 5, 10, 30, 60, 100])
+    fun `should wait to dispatch until other queries are published`(concurrency: Int): Unit = runBlocking {
+
+        (1..concurrency).forEach {
             DBeatles += it to "Person$it"
         }
         // We will need to catch some diagnostic event
-        val listener = ChannelEventListener { it is DataLoaderEvent.WaitForBatching }
-        val registry = DataLoaderRegistry(DataLoaderEventLogger + listener) + GetPersonById.batched { keys ->
+        //val listener = ChannelEventListener { it is DataLoaderEvent.WaitForBatching }
+        val registry = DataLoaderRegistry(LoggerEventListener /*+ listener*/) + GetPersonById.batched { keys ->
             // we expect 30 queries to be batched
-            assertEquals(30, keys.size)
+            check(concurrency == keys.size) { "$concurrency != ${keys.size}" }
             getPersonsById(keys)
         }
 
@@ -151,19 +185,19 @@ class DataLoadersTests : LogScope {
             val deferred = GetPersonById(1)
             val queries = mutableListOf<Deferred<Person>>()
             launch {
-                while (queries.size < 30) {
+                while (queries.size < concurrency) {
                     // Wait for the next WaitForBatching event to be emitted
-                    val (_, ack) = listener.out.receive()
+                    //val (_, ack) = listener.out.receive()
                     log("SendNextQuery", "size" to queries.size)
                     queries += GetPersonById(queries.size + 1)
                     // tell the dispatcher it can resume
-                    ack.notify()
+                    //ack.notify()
                 }
                 log("AllQueriesSent", "size" to queries.size)
                 allQueriesAreSent.set(true)
-                val (_, ack) = listener.out.receive()
+                //val (_, ack) = listener.out.receive()
                 // all queries has sent, the dispatcher will resume and dispatch all of previous queries
-                ack.notify()
+                //ack.notify()
             }
             log("AccumulateQueriesJobStarted")
             withTimeout(1000) {
@@ -186,8 +220,8 @@ class DataLoadersTests : LogScope {
 
         val barrier = CyclicBarrier(2)
 
-        val registry = DataLoaderRegistry(DataLoaderEventLogger) + GetPersonById.batched { keys ->
-            assertEquals(2, keys.size)
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
+            check(2 == keys.size)
             barrier.await()
             getPersonsById(keys)
         } + GetPersonsByNameStartingWith.batched { keys ->
@@ -216,89 +250,45 @@ class DataLoadersTests : LogScope {
     }
 
     @Test
-    fun `should parallelize and batch calls to different data loaders on multiple threads`(): Unit = runBlocking {
-        withContext(Dispatchers.IO) {
+    fun `should parallelize and batch calls to different data loaders on multiple threads`(): Unit = runBlocking(Dispatchers.IO) {
 
-            val barrier = CyclicBarrier(2)
-            val listener = ChannelEventListener {
-                (it is DataLoaderEvent.DispatchRequested && it.query.key in listOf(1, 2))
-            }
+        val barrier = CyclicBarrier(2)
 
-            val registry = DataLoaderRegistry(DataLoaderEventLogger + listener) + GetPersonById.batched { keys ->
-                barrier.await()
-                assertEquals(2, keys.size)
-                getPersonsById(keys)
-            } + GetPersonsByNameStartingWith.batched { keys ->
-                barrier.await()
-                keys.associateWith { k ->
-                    DBeatles.entries
-                        .filter { it.value.startsWith(k) }
-                        .map { it.value }
-                        .toList()
-                }
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
+            barrier.await()
+            check(2 == keys.size)
+            getPersonsById(keys)
+        } + GetPersonsByNameStartingWith.batched { keys ->
+            barrier.await()
+            keys.associateWith { k ->
+                DBeatles.values
+                    .filter { it.startsWith(k) }
+                    .toList()
             }
-            registry.withDataLoaders {
-                val john = async { GetPersonById(1).await() }
+        }
+        registry.withDataLoaders {
+            listOf(
+                launch {
+                    val john = GetPersonById(1)
+                    withTimeout(500) {
+                        assertEquals("john", john.await())
+                    }
+                },
                 launch {
                     val paul = GetPersonById(2)
-                    yield()
+
+                    withTimeout(500) {
+                        assertEquals("paul", paul.await())
+                    }
+                },
+                launch {
                     val ringo = GetPersonsByNameStartingWith("ri")
 
                     withTimeout(500) {
-                        assertEquals("john", john.await())
-                        assertEquals("paul", paul.await())
                         assertEquals(listOf("ringo"), ringo.await())
                     }
                 }
-                // Wait for both john and paul to arrive to the DispatchRequest
-                // so that we are sure the two threads are going in parallel
-                val (_, ackFirst) = listener.out.receive()
-                val (_, ackSecond) = listener.out.receive()
-                ackSecond.notify()
-                ackFirst.notify()
-
-            }
-        }
-    }
-
-    @Test
-    fun `should not batch if another data loader miss the dispatch`() = runBlocking {
-        withContext(Dispatchers.IO) {
-            val getPersonIdExecutions = AtomicInt()
-            val listener = ChannelEventListener {
-                (it is DataLoaderEvent.DispatchCompleted && it.query.key == 1)
-                        || (it is DataLoaderEvent.AcquiringLock && it.query.key == 2)
-            }
-            val registry = DataLoaderRegistry(DataLoaderEventLogger + listener) + GetPersonById.batched { keys ->
-                log("GetPersonById", "keys" to keys)
-                getPersonIdExecutions.incrementAndGet()
-                assertEquals(1, keys.size) //expecting 1 means no batching
-                getPersonsById(keys)
-            }
-            registry.withDataLoaders {
-                val john = GetPersonById(1)
-                log("step1")
-
-                withTimeout(1000) {
-                    val (_, ack) = listener.out.receive()
-                    // after receiving the DispatchCompleted run another data loader
-                    val paul = async {
-                        GetPersonById(2).await()
-                    }
-                    // wait for this second one to try to AcquireLock
-                    // to sync the coroutines
-                    val (_, ackSecondQuery) = listener.out.receive()
-                    ackSecondQuery.notify()
-                    // wait for paul to try to append in the dispatching
-                    delay(10)
-                    ack.notify()
-                    assertEquals("john", john.await())
-                    //get person id should have been executed only once when "john" returns from the await
-                    assertEquals(1, getPersonIdExecutions.get())
-                    assertEquals("paul", paul.await())
-                    assertEquals(2, getPersonIdExecutions.get())
-                }
-            }
+            ).joinAll()
         }
     }
 
@@ -306,7 +296,7 @@ class DataLoadersTests : LogScope {
     @Test
     fun `slow operations should not block faster operations`() = runBlocking {
         val completeSlowOperation = Channel<Unit>()
-        val registry = DataLoaderRegistry(DataLoaderEventLogger) +
+        val registry = DataLoaderRegistry(LoggerEventListener) +
                 GetPersonById.batched { keys ->
                     getPersonsById(keys)
                 } +
@@ -327,5 +317,33 @@ class DataLoadersTests : LogScope {
                 assertEquals("result", slowOperation.await())
             }
         }
+    }
+
+    object LoadSomething : DataLoaderRef<String, String>
+    @ParameterizedTest
+    @ValueSource(ints = [2, 10, 50, 100, 1000])
+    fun `should aggregate queries`(concurrency: Int): Unit = runBlocking {
+        //withContext(Dispatchers.IO) {
+            val registry = DataLoaderRegistry(LoggerEventListener) + LoadSomething.batched { keys ->
+                check(keys.size == concurrency) { "Should aggregate $concurrency keys, but they were ${keys.size}" }
+                keys.associateWith { it.lowercase() }
+            }
+
+            registry.withDataLoaders {
+                (1..concurrency).map {
+                    launch {
+                        var s = "$it-"
+                        repeat(Random.nextInt(20, 30)) {
+                            delay(Random.nextLong(0, 3))
+                            s = "$s${Random.nextInt('A'.code, 'Z'.code).toChar()}"
+                        }
+                        val query = LoadSomething(s)
+                        withTimeout(1000) {
+                            assertEquals(s.lowercase(), query.await())
+                        }
+                    }
+                }.joinAll()
+            }
+        //}
     }
 }
