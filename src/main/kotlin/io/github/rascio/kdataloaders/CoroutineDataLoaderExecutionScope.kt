@@ -5,14 +5,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.yield
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -25,54 +21,31 @@ data class Query<K : Any, V>(val key: K, val ref: DataLoaderRef<K, V>)
 private infix fun <K: Any, V> DataLoaderRef<K, V>.to(key: K) = Query(key, this)
 
 /**
- * Utility listener of execution events
- */
-interface DataLoaderEventListener {
-    suspend operator fun invoke(event: DataLoaderEvent)
-
-    /**
-     * Merge two event listeners creating a new one calling both of them
-     */
-    operator fun plus(other: DataLoaderEventListener) =
-        DataLoaderEventListener { event ->
-            this(event)
-            other(event)
-        }
-
-    companion object {
-        /**
-         * Constructor mimicking lambda functions
-         */
-        inline operator fun invoke(crossinline block: suspend (DataLoaderEvent) -> Unit) =
-            object : DataLoaderEventListener {
-                override suspend fun invoke(event: DataLoaderEvent) = block(event)
-            }
-    }
-}
-
-/**
  * Main scope for data loaders.
  * It contains the required dependencies, and manage the main state
  *
  * When having it in scope (like when using `registry.withDataLoaders { }`)
- * make the DataLoaderRef invokable like a function (using the invoke operator fun)
+ * make the DataLoaderRef invokable like a function (using the `invoke()` operator fun)
  *
- * It then will send the query and schedule the dispatch, or join an ongoing dispatch
+ * It will send the query and schedule the dispatch, or join an ongoing dispatch
  * batching together multiple queries
  */
 class CoroutineDataLoaderExecutionScope internal constructor(
     private val dataLoaderCoroutineScope: CoroutineScope,
     private val registry: DataLoaderRegistry,
     private val eventListener: DataLoaderEventListener
-) : DataLoaderExecutionScope, LogScope {
-
+) : DataLoaderExecutionScope {
 
     private class State {
         /*
-         * Contains all the ongoing queries, they are executed asynchronously
-         * and then it will be cleared waiting for another dispatch
+         * Contains all the ongoing queries, they are executed asynchronously,
+         * and then they will be `clear()` waiting for another dispatch
          */
         private val state = mutableMapOf<DataLoaderRef<*, *>, MutableMap<Any, CompletableDeferred<*>>>()
+
+        fun clear() {
+            state.clear()
+        }
 
         /*
          * Append a query in the state, generate a CompletableDeferred for it, if not already available
@@ -83,7 +56,6 @@ class CoroutineDataLoaderExecutionScope internal constructor(
                 .computeIfAbsent(ref) { mutableMapOf() }
                 .computeIfAbsent(key) { CompletableDeferred<Any>() }
 
-            //version.incrementAndGet()
             @Suppress("UNCHECKED_CAST")
             return found as Deferred<V>
         }
@@ -92,30 +64,27 @@ class CoroutineDataLoaderExecutionScope internal constructor(
          * Represent a batch of queries that needs to be executed
          */
         data class QueryBatch<K : Any, V>(val ref: DataLoaderRef<K, V>, val entries: Map<K, CompletableDeferred<V>>)
+
+        // Virtual property returning the batches of queries that need to be dispatched
+        val queriesToDispatch: List<QueryBatch<*, *>> get() {
+            return state.keys
+                .map { getBatch(it) }
+        }
         @Suppress("UNCHECKED_CAST")
         private fun <K : Any, V> getBatch(ref: DataLoaderRef<K, V>): QueryBatch<K, V> =
             state.computeIfAbsent(ref) { ConcurrentHashMap<Any, CompletableDeferred<*>>() }
                 .entries
                 .associate { (k, v) -> k as K to v as CompletableDeferred<V> }
                 .let { QueryBatch(ref, it) }
-        // Virtual property returning the batches of queries that need to be dispatched
-        val queriesToDispatch: List<QueryBatch<*, *>> get() {
-            return state.keys
-                .map { getBatch(it) }
-        }
-
-        fun clear() {
-            state.clear()
-        }
     }
 
     /*
      * Used to synchronize access over the State
      */
     private val mutex = Mutex()
-    private val queue: State = State()
+    private val state: State = State()
     // The version will increase every time a DataLoader is invoked
-    val version = AtomicLong()
+    private val version = AtomicLong()
     private val isDispatching = AtomicBoolean(false)
 
     /**
@@ -126,7 +95,7 @@ class CoroutineDataLoaderExecutionScope internal constructor(
         eventListener(DataLoaderEvent.AcquiringLock(query))
         version.incrementAndGet()
         return mutex.withLock {
-            queue.append(query).also {
+            state.append(query).also {
                 eventListener(DataLoaderEvent.QueryAppended(query))
                 // If not already dispatching, do the dispatch
                 if (!isDispatching.get()) {
@@ -138,6 +107,9 @@ class CoroutineDataLoaderExecutionScope internal constructor(
 
 
     private suspend fun <K : Any, V> dispatch(query: Query<K, V>) {
+        // The dispatch is done asynchronously in a coroutine children of the main scope
+        // In this way the current coroutine can continue to do its job and in case
+        // append other queries that will be used during the dispatch
         dataLoaderCoroutineScope.launch(CoroutineName("Dispatch-${query.ref::class.simpleName}-${query.key}")) {
             eventListener(DataLoaderEvent.DispatchRequested(query))
             // Check no other coroutines are dispatching at the moment
@@ -149,14 +121,14 @@ class CoroutineDataLoaderExecutionScope internal constructor(
                     eventListener(DataLoaderEvent.DispatchStarted(query))
                     try {
                         // Get all the batches and dispatch them asynchronously
-                        queue.queriesToDispatch
+                        state.queriesToDispatch
                             .forEach { batch -> dispatchAsync(batch) }
 
                         eventListener(DataLoaderEvent.DispatchCompleted(query))
                         // all the batches have been dispatched
                         // clear the queue and release everything
                         // the scope is now ready to collect new queries
-                        queue.clear()
+                        state.clear()
                     } finally {
                         isDispatching.set(false)
                     }
@@ -175,7 +147,9 @@ class CoroutineDataLoaderExecutionScope internal constructor(
             expected = read
             // try to run other coroutines if scheduled
             // yield()
-            // a small delay works better than yield() as it better support multi threading
+            // a small delay works better than yield() as in case this coroutine is being executed
+            // in a multi thread Dispatcher yield() can return immediately
+            // delay() gives some time to those threads to append in the state
             delay(5)
             read = version.get()
             eventListener(DataLoaderEvent.CheckForBatching(query, expected, read))
@@ -215,19 +189,57 @@ class CoroutineDataLoaderExecutionScope internal constructor(
 
     companion object {
 
-        sealed interface DataLoaderEvent {
-            data class AcquiringLock(val query: Query<*, *>) : DataLoaderEvent
-            data class QueryAppended(val query: Query<*, *>) : DataLoaderEvent
-            data class DispatchRequested(val query: Query<*, *>) : DataLoaderEvent
-            data class DispatchStarted(val query: Query<*, *>) : DataLoaderEvent
-            data class DispatchCompleted(val query: Query<*, *>) : DataLoaderEvent
-            data class DispatchAccepted(val query: Query<*, *>) : DataLoaderEvent
-            data class DispatchRejected(val query: Query<*, *>) : DataLoaderEvent
-            data class WaitForBatching(val query: Query<*, *>, val version: Any) : DataLoaderEvent
-            data class CheckForBatching(val query: Query<*, *>, val expected: Any, val actual: Any) : DataLoaderEvent
-            data class RefDispatchStarted(val ref: DataLoaderRef<*, *>) : DataLoaderEvent
-            data class RefDispatchFailed(val ref: DataLoaderRef<*, *>, val e: Exception) : DataLoaderEvent
-            data class RefDispatchSucceed(val ref: DataLoaderRef<*, *>, val keys: Set<*>) : DataLoaderEvent
+        sealed class DataLoaderEvent {
+
+            val time = System.currentTimeMillis()
+
+            data class AcquiringLock(val query: Query<*, *>) : DataLoaderEvent()
+            data class QueryAppended(val query: Query<*, *>) : DataLoaderEvent()
+            data class DispatchRequested(val query: Query<*, *>) : DataLoaderEvent()
+            data class DispatchStarted(val query: Query<*, *>) : DataLoaderEvent()
+            data class DispatchCompleted(val query: Query<*, *>) : DataLoaderEvent()
+            data class DispatchAccepted(val query: Query<*, *>) : DataLoaderEvent()
+            data class DispatchRejected(val query: Query<*, *>) : DataLoaderEvent()
+            data class WaitForBatching(val query: Query<*, *>, val version: Any) : DataLoaderEvent()
+            data class CheckForBatching(val query: Query<*, *>, val expected: Any, val actual: Any) : DataLoaderEvent()
+            data class RefDispatchStarted(val ref: DataLoaderRef<*, *>) : DataLoaderEvent()
+            data class RefDispatchFailed(val ref: DataLoaderRef<*, *>, val e: Exception) : DataLoaderEvent()
+            data class RefDispatchSucceed(val ref: DataLoaderRef<*, *>, val keys: Set<*>) : DataLoaderEvent()
         }
+    }
+}
+
+/**
+ * Utility listener of diagnostic events
+ */
+interface DataLoaderEventListener {
+    fun interface Factory {
+        fun create(): DataLoaderEventListener
+
+        /**
+         * Merge two event listeners creating a new one calling both of them
+         */
+        operator fun plus(other: Factory) =
+            Factory { this@Factory.create() + other.create() }
+    }
+    suspend operator fun invoke(event: DataLoaderEvent)
+
+    /**
+     * Merge two event listeners creating a new one calling both of them
+     */
+    operator fun plus(other: DataLoaderEventListener) =
+        DataLoaderEventListener { event ->
+            this(event)
+            other(event)
+        }
+
+    companion object {
+        /**
+         * Constructor mimicking lambda functions
+         */
+        inline operator fun invoke(crossinline block: suspend (DataLoaderEvent) -> Unit) =
+            object : DataLoaderEventListener {
+                override suspend fun invoke(event: DataLoaderEvent) = block(event)
+            }
     }
 }

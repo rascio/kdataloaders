@@ -13,7 +13,21 @@ import kotlin.coroutines.CoroutineContext
  * Registry of data loaders.
  * It is used to register the implementation that is triggered by a `DataLoaderRef`.
  *
- * It can be simply instantiated and used as follow:
+ * There are two ways to register DataLoaders in the registry:
+ * ```
+ * val dataLoader1: DataLoader<String, Int>
+ * val dataLoader2: DataLoader<String, Long>
+ *
+ * // using register method
+ * val registry = DataLoaderRegistry()
+ * registry.register(dataLoader1)
+ * registry.register(dataLoader2)
+ *
+ * //using operators
+ * val registry = DataLoaderRegistry() + dataLoader1 + dataLoader2
+ * ```
+ *
+ * It can then be used to retrieve the data loader scope and execute queries with it, as:
  * ```
  * object MyQuery : DataLoaderRef<String, Int>
  *
@@ -35,7 +49,7 @@ import kotlin.coroutines.CoroutineContext
  * }
  * ```
  */
-class DataLoaderRegistry(private val eventListener: DataLoaderEventListener = DataLoaderEventListener {  }) {
+class DataLoaderRegistry(private val eventListener: DataLoaderEventListener.Factory = NoOpListener) {
     /*
     private val coroutineScope = CoroutineScope(
         context = CoroutineName("DataLoaderDispatcher")
@@ -60,13 +74,14 @@ class DataLoaderRegistry(private val eventListener: DataLoaderEventListener = Da
             CoroutineDataLoaderExecutionScope(
                 dataLoaderCoroutineScope = this,
                 registry = this@DataLoaderRegistry,
-                eventListener = eventListener
+                eventListener = eventListener.create()
             ).block()
         }
     }
 
     @Suppress("UNCHECKED_CAST")
     operator fun <Ref: DataLoaderRef<K, V>, K: Any, V> get(ref: Ref): DataLoader<Ref, K, V> =
-        dataLoaders[ref]!! as DataLoader<Ref, K, V>
+        checkNotNull(dataLoaders[ref]) { "DataLoader for $ref was invoked, but not registered" }
+                as DataLoader<Ref, K, V>
 
 }

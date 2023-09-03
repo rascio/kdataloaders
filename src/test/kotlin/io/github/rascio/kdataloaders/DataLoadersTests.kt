@@ -1,7 +1,5 @@
 import arrow.atomic.AtomicBoolean
 import arrow.atomic.AtomicInt
-import arrow.core.memoize
-import arrow.core.raise.effect
 import arrow.fx.coroutines.CyclicBarrier
 import io.github.rascio.kdataloaders.DataLoaderRef
 import io.github.rascio.kdataloaders.DataLoaderRegistry
@@ -10,11 +8,13 @@ import io.github.rascio.kdataloaders.LoggerEventListener
 import io.github.rascio.kdataloaders.MissingResultException
 import io.github.rascio.kdataloaders.batched
 import io.github.rascio.kdataloaders.cached
+import io.github.rascio.kdataloaders.dataLoaderEffect
 import io.github.rascio.kdataloaders.notify
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -24,7 +24,6 @@ import org.junit.jupiter.api.TestInstance
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
-import java.nio.charset.Charset
 import java.security.MessageDigest
 import java.util.TreeMap
 import java.util.concurrent.TimeUnit
@@ -36,6 +35,7 @@ object GetPersonById : DataLoaderRef<Int, Person>
 
 @TestInstance(TestInstance.Lifecycle.PER_METHOD)
 class DataLoadersTests : LogScope {
+    // I need a test DB
     val DBeatles = TreeMap(
         mapOf(
             1 to "john",
@@ -61,6 +61,26 @@ class DataLoadersTests : LogScope {
 
             withTimeout(100) {
                 assertEquals("john", john.await())
+            }
+        }
+    }
+    @Test
+    fun `should call a single data loader from another function`() = runBlocking {
+        fun doTest() = dataLoaderEffect {
+            val john = GetPersonById(1)
+
+            log("Loading")
+
+            john.await()
+        }
+        val registry = DataLoaderRegistry(LoggerEventListener) + GetPersonById.batched { keys ->
+            getPersonsById(keys)
+        }
+        registry.withDataLoaders {
+            val john = doTest().bind()
+
+            withTimeout(100) {
+                assertEquals("john", john)
             }
         }
     }
@@ -288,6 +308,7 @@ class DataLoadersTests : LogScope {
         val completeSlowOperation = Channel<Unit>()
         val registry = DataLoaderRegistry(LoggerEventListener) +
                 GetPersonById.batched { keys ->
+                    delay(10) //I/O
                     getPersonsById(keys)
                 } +
                 SlowOperation.batched { keys ->

@@ -22,7 +22,6 @@ fun <Ref : DataLoaderRef<K, V>, K : Any, V> DataLoader<Ref, K, V>.cached() = obj
             cache[k]?.let { k to it}
         }.toMap()
         val missing = keys - cached.keys
-        Logger.log("CachedDataLoader", "Load", "requested" to keys, "cached" to cached.keys, "missing" to missing)
         if (missing.isEmpty()) {
             cached
         } else {
